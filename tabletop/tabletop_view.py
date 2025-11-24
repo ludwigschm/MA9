@@ -1050,13 +1050,13 @@ class TabletopRoot(FloatLayout):
             return None
         if parsed == 19:
             return 'high'
-        if parsed in (16, 17, 18):
+        if parsed in ( 17, 18):
             return 'mid'
-        if parsed in (14, 15):
+        if parsed in (14, 15, 16):
             return 'low'
         if parsed > 22:
             return None
-        if parsed >= 16:
+        if parsed >= 17:
             return 'mid'
         return 'low'
 
@@ -1816,7 +1816,7 @@ class TabletopRoot(FloatLayout):
         if self.intro_active:
             return ''
         # Runde im Block / total (Blockgröße variabel, Übung ohne Logging)
-        total_rounds = max(1, self.current_block_total_rounds or 16)
+        total_rounds = max(1, self.current_block_total_rounds or 12)
         rnd_in_block = self.round_in_block or 1
         rnd_display = min(max(1, rnd_in_block), total_rounds)
         block_suffix = ' (Übung)' if self.is_practice_block_active() else ''
