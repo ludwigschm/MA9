@@ -1,4 +1,12 @@
-"""Integration helpers for communicating with Pupil Labs devices."""
+"""Integration helpers for communicating with Pupil Labs devices.
+
+Recent changes enforce a strict startup order: devices must connect, measure
+their host-companion clock offset, and only then start emitting or receiving
+events. The bridge now calibrates offsets immediately after connecting and
+enables event dispatching solely for calibrated devices. Event dispatch no
+longer raises runtime errors when offsets are missing; such events are dropped
+with clear log messages instead.
+"""
 
 # // Neon RT API does not expose /api/capabilities. Status websocket is the source of truth.
 
@@ -323,6 +331,7 @@ class PupilBridge:
         self._last_queue_log = 0.0
         self._last_send_log = 0.0
         self._clock_offset_ns: Dict[str, int] = {}
+        self._calibrated_players: set[str] = set()
         # Clock offsets (host - companion, in nanoseconds) are determined once via
         # :meth:`calibrate_time_offset` and reused for the session.
         self._measured_device_keys: set[str] = set()
@@ -365,12 +374,57 @@ class PupilBridge:
         """Discover or configure devices and map them to configured players."""
 
         self.ready.clear()
+        self._calibrated_players.clear()
         configured_players = {
             player for player, cfg in self._device_config.items() if cfg.is_configured
         }
         if configured_players:
-            return self._connect_from_config(configured_players)
-        return self._connect_via_discovery()
+            connected = self._connect_from_config(configured_players)
+        else:
+            connected = self._connect_via_discovery()
+
+        if not connected:
+            return False
+
+        calibrated = self._calibrate_connected_devices()
+        if calibrated:
+            self.ready.set()
+            self._start_calibrated_recordings(calibrated)
+        else:
+            log.warning(
+                "Clock-Offset-Kalibrierung fehlgeschlagen – Eventversand bleibt deaktiviert."
+            )
+        return bool(calibrated)
+
+    def _calibrate_connected_devices(self) -> set[str]:
+        players = set(self.connected_players())
+        if not players:
+            log.warning("Keine verbundenen Geräte für die Kalibrierung vorhanden.")
+            return set()
+
+        try:
+            offsets = self.calibrate_time_offset(players=players, strict=False)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            log.error(
+                "Kalibrierung der Clock-Offsets schlug fehl: %s", exc, exc_info=True
+            )
+            return set()
+
+        calibrated_players = set(offsets.keys())
+        missing = players - calibrated_players
+        if missing:
+            log.warning(
+                "Keine Offset-Werte für: %s – Events bleiben für diese Geräte deaktiviert.",
+                ", ".join(sorted(missing)),
+            )
+        return calibrated_players
+
+    def _start_calibrated_recordings(self, players: set[str]) -> None:
+        for player in sorted(players):
+            device = self._device_by_player.get(player)
+            if device is None:
+                continue
+            self._auto_start_recording(player, device)
 
     def _validate_config(self) -> None:
         vp1 = self._device_config.get("VP1")
@@ -431,7 +485,6 @@ class PupilBridge:
                 device_key,
             )
             self._on_device_connected(player, device, cfg, device_key)
-            self._auto_start_recording(player, device)
 
         if "VP1" in configured_players and self._device_by_player.get("VP1") is None:
             raise RuntimeError("VP1 ist konfiguriert, konnte aber nicht verbunden werden.")
@@ -586,8 +639,6 @@ class PupilBridge:
                 )
             elif not cfg.device_id:
                 cfg.device_id = device_id
-            if not self.ready.is_set():
-                self.ready.set()
             return DeviceIdentity(device_id=device_id, module_serial=module_serial)
 
         if module_serial:
@@ -600,9 +651,6 @@ class PupilBridge:
 
         if not device_id:
             self._warn_missing_device_id_once()
-
-        if not self.ready.is_set():
-            self.ready.set()
         return DeviceIdentity(device_id=None, module_serial=module_serial)
 
     def _warn_missing_device_id_once(self) -> None:
@@ -1197,7 +1245,6 @@ class PupilBridge:
                     device_key,
                 )
                 self._on_device_connected(player, prepared, cfg, device_key)
-                self._auto_start_recording(player, prepared)
             except Exception as exc:  # pragma: no cover - hardware dependent
                 log.warning("Gerät %s konnte nicht verbunden werden: %s", base_key, exc)
 
@@ -1259,6 +1306,7 @@ class PupilBridge:
         self._assigned_device_keys.clear()
         self._device_key_usage.clear()
         self._clock_offset_ns.clear()
+        self._calibrated_players.clear()
         self._measured_device_keys.clear()
 
     # ------------------------------------------------------------------
@@ -1859,7 +1907,10 @@ class PupilBridge:
         ]
 
     def calibrate_time_offset(
-        self, *, players: Optional[Iterable[str]] = None
+        self,
+        *,
+        players: Optional[Iterable[str]] = None,
+        strict: bool = True,
     ) -> dict[str, int]:
         """Measure the host-companion clock offset exactly once.
 
@@ -1870,22 +1921,32 @@ class PupilBridge:
 
         selected = list(players) if players is not None else self.connected_players()
         if not selected:
-            raise RuntimeError(
-                "Keine verbundenen Geräte für die Clock-Offset-Messung gefunden."
-            )
+            message = "Keine verbundenen Geräte für die Clock-Offset-Messung gefunden."
+            if strict:
+                raise RuntimeError(message)
+            log.warning(message)
+            return {}
 
         offsets: dict[str, int] = {}
         for player in selected:
             device = self._device_by_player.get(player)
             if device is None:
-                raise RuntimeError(
+                message = (
                     f"Gerät für {player} ist nicht verbunden – Offset-Messung unmöglich."
                 )
+                if strict:
+                    raise RuntimeError(message)
+                log.warning(message)
+                continue
             device_key = self._player_device_key.get(player)
             if not device_key:
-                raise RuntimeError(
+                message = (
                     f"Kein device_key für {player} vorhanden – bitte Verbindung prüfen."
                 )
+                if strict:
+                    raise RuntimeError(message)
+                log.warning(message)
+                continue
             if device_key in self._measured_device_keys:
                 offsets[player] = int(self._clock_offset_ns[device_key])
                 continue
@@ -1923,7 +1984,10 @@ class PupilBridge:
                     attempts=_CLOCK_OFFSET_MAX_ATTEMPTS,
                     device_key=device_key,
                 )
-                raise RuntimeError(message) from last_error
+                if strict:
+                    raise RuntimeError(message) from last_error
+                log.error(message)
+                continue
 
             clock_offset_ns = int(round(offset_ms * 1_000_000.0))
             # Store the measured host-companion clock offset in nanoseconds for later
@@ -1932,6 +1996,11 @@ class PupilBridge:
             self._measured_device_keys.add(device_key)
             offsets[player] = clock_offset_ns
 
+        self._calibrated_players.update(offsets.keys())
+        if offsets:
+            self.ready.set()
+        elif strict:
+            raise RuntimeError("Clock-Offset-Messung fehlgeschlagen – keine Werte erhalten.")
         return offsets
 
     # ------------------------------------------------------------------
@@ -2046,10 +2115,12 @@ class PupilBridge:
 
         device_key = self._player_device_key.get(player)
         if not device_key or device_key not in self._clock_offset_ns:
-            raise RuntimeError(
-                f"Clock-Offset für {player} fehlt – calibrate_time_offset() muss vor "
-                "dem Eventversand gelaufen sein."
+            log.warning(
+                "Clock-Offset fehlt für %s – Event %s wird verworfen, Kalibrierung erforderlich.",
+                player,
+                name,
             )
+            return
 
         clock_offset_ns = int(self._clock_offset_ns[device_key])
 
@@ -2176,6 +2247,11 @@ class PupilBridge:
             policy = policy_for(name)
         if not self.ready.is_set():
             log.warning("PupilBridge not ready; dropping event: %s", name)
+            return
+        if player not in self._calibrated_players:
+            log.warning(
+                "PupilBridge not calibrated for %s; dropping event: %s", player, name
+            )
             return
         assert self.ready.is_set()
         ui_event = UIEvent(
