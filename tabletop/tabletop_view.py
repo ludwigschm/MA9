@@ -1585,7 +1585,7 @@ class TabletopRoot(FloatLayout):
             self.in_block_pause = True
             self.pause_message = self.controller.state.pause_message or (
                 "Dieser Block ist vorbei. Nehmen Sie sich einen Moment zum Durchatmen.\n"
-                "Wenn Sie bereit sind, klicken Sie auf Weiter."
+                "Wenn Sie bereit sind, klicken Sie auf Play."
             )
             self.phase = UXPhase.WAIT_BOTH_START
             self.apply_phase()
