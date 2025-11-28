@@ -28,7 +28,6 @@ from tabletop.core.clock import now_ns
 from tabletop.data.blocks import load_blocks, load_csv_rounds, value_to_card_path
 from tabletop.data.config import ARUCO_OVERLAY_PATH, ROOT
 from tabletop.logging import async_bridge
-from tabletop.logging.events_bridge import push_async
 from tabletop.logging.events import Events
 from tabletop.logging.round_csv import (
     close_round_log,
@@ -2097,8 +2096,8 @@ class TabletopRoot(FloatLayout):
         if should_log:
             write_round_log(self, actor, action, payload_dict, player, t_ns=t_ns)
         base = self._bridge_payload_base(player=None)
-        cloud_event = {k: base[k] for k in ("session", "block", "player") if k in base}
-        cloud_event.update(
+        bridge_event = {k: base[k] for k in ("session", "block", "player") if k in base}
+        bridge_event.update(
             {
                 "round_index": round_idx,
                 "actor": actor,
@@ -2106,20 +2105,20 @@ class TabletopRoot(FloatLayout):
             }
         )
         if phase == "input_received":
-            cloud_event["phase"] = phase
+            bridge_event["phase"] = phase
         if player is not None:
-            cloud_event["game_player"] = player
+            bridge_event["game_player"] = player
         role_value = self.player_roles.get(player)
         if role_value is not None:
-            cloud_event["player_role"] = role_value
+            bridge_event["player_role"] = role_value
         for key in ("button", "accepted", "decision"):
             if key in payload_dict:
-                cloud_event[key] = payload_dict[key]
-        cloud_event["t_ns"] = t_ns
-        cloud_event["t_utc_iso"] = t_utc_iso
-        cloud_event = {k: v for k, v in cloud_event.items() if k in ALLOWED_EVENT_KEYS}
+                bridge_event[key] = payload_dict[key]
+        bridge_event["t_ns"] = t_ns
+        bridge_event["t_utc_iso"] = t_utc_iso
+        bridge_event = {k: v for k, v in bridge_event.items() if k in ALLOWED_EVENT_KEYS}
         # Downstream analytics rely on this event_id – every payload keeps it so
-        # cloud CSVs can be matched by identifier rather than implicit ordering.
+        # event CSVs can be matched by identifier rather than implicit ordering.
         should_forward = phase == "input_received"
         if not should_forward and action in {
             "session_start",
@@ -2128,10 +2127,8 @@ class TabletopRoot(FloatLayout):
             "session_end",
         }:
             should_forward = True
-        if should_forward:
-            push_async(cloud_event)
-            if self.marker_bridge and action != "round_start":
-                self.marker_bridge.enqueue(f"action.{action}", cloud_event)
+        if should_forward and self.marker_bridge and action != "round_start":
+            self.marker_bridge.enqueue(f"action.{action}", bridge_event)
         return record
 
     def prompt_session_number(self):
