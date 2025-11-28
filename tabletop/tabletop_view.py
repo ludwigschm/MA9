@@ -2053,6 +2053,13 @@ class TabletopRoot(FloatLayout):
         payload_dict.setdefault("t_utc_iso", t_utc_iso)
         event_id = event_id or str(uuid.uuid4())
         payload_dict.setdefault("event_id", event_id)
+        vp_role = self.role_by_physical.get(player) if player in (1, 2) else None
+        if vp_role == 1:
+            payload_dict.setdefault("event_id_vp1", event_id)
+            payload_dict.setdefault("event_id_vp2", "")
+        elif vp_role == 2:
+            payload_dict.setdefault("event_id_vp1", "")
+            payload_dict.setdefault("event_id_vp2", event_id)
         payload_dict.setdefault("phase", phase)
         actor = self._actor_label(player)
         round_idx = max(0, self.round - 1)
