@@ -274,6 +274,13 @@ class TabletopController:
             state.round_in_block = state.current_round_idx + 1
             state.current_round_has_stake = bool(block.get("payout"))
             state.current_block_total_rounds = len(block.get("rounds") or [])
+            if state.round_in_block == 1:
+                block_index = block.get("index")
+                if block_index in (3, 4):
+                    state.signaler, state.judge = 2, 1
+                else:
+                    state.signaler, state.judge = 1, 2
+                self.update_turn_order()
             if block.get("payout") and state.score_state_block != block.get("index"):
                 state.score_state = {1: 0, 2: 0}
                 state.score_state_block = block.get("index")

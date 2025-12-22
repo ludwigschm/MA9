@@ -207,6 +207,8 @@ class TabletopRoot(FloatLayout):
         self.aruco_enabled = False
         self._aruco_proc = None
         self.start_block = 1
+        self._block_start_markers_sent: set[int] = set()
+        self._block_end_markers_sent: set[int] = set()
         # Versuchsperson 1 sitzt immer unten (Spieler 1), Versuchsperson 2 oben (Spieler 2)
         self._fixed_role_mapping = {1: 1, 2: 2}
         self.role_by_physical = self._fixed_role_mapping.copy()
@@ -618,6 +620,32 @@ class TabletopRoot(FloatLayout):
                     log.exception("Bridge event dispatch failed: %s", name)
 
         self._bridge_dispatcher.submit(_dispatch)  # non-blocking: moved to worker
+
+    def _experimental_block_index(self, *, upcoming: bool = False) -> Optional[int]:
+        block_info: Optional[Dict[str, Any]] = None
+        if upcoming:
+            preview = self.next_block_preview or {}
+            block_info = preview.get("block") if isinstance(preview, dict) else None
+        else:
+            block_info = self.current_block_info
+        if not isinstance(block_info, dict):
+            return None
+        if block_info.get("practice"):
+            return None
+        block_index = block_info.get("index")
+        return block_index if block_index in (1, 2, 3, 4) else None
+
+    def _emit_block_marker(self, name: str, block_index: int) -> None:
+        if self.marker_bridge:
+            self.marker_bridge.enqueue(name, {"block": block_index})
+        if self.logger and self.session_configured:
+            self.log_event(
+                None,
+                name,
+                {"block": block_index},
+                phase="action_applied",
+                blocking=self._strict_logging_enabled(),
+            )
 
     def _emit_button_bridge_event(
         self,
@@ -1238,6 +1266,16 @@ class TabletopRoot(FloatLayout):
             if blocked_reason is not None:
                 return
 
+            if action == "start_click" and not (self.p1_pressed and self.p2_pressed):
+                upcoming = bool(self.in_block_pause)
+                block_index = self._experimental_block_index(upcoming=upcoming)
+                if (
+                    block_index is not None
+                    and block_index not in self._block_start_markers_sent
+                ):
+                    self._block_start_markers_sent.add(block_index)
+                    self._emit_block_marker(f"start_block_{block_index}", block_index)
+
             if who == 1:
                 self.p1_pressed = True
             else:
@@ -1297,6 +1335,14 @@ class TabletopRoot(FloatLayout):
                     self.record_action(who, "Play gedrückt")
                     return
                 if self.phase == UXPhase.SHOWDOWN:
+                    block_index = self._experimental_block_index()
+                    if (
+                        block_index is not None
+                        and self.round_in_block == self.current_block_total_rounds
+                        and block_index not in self._block_end_markers_sent
+                    ):
+                        self._block_end_markers_sent.add(block_index)
+                        self._emit_block_marker("end_block", block_index)
                     self.log_round_start_if_pending()
                     self.prepare_next_round(start_immediately=True)
                     outcome_payload["resume"] = "showdown_to_next_round"
@@ -2284,6 +2330,8 @@ class TabletopRoot(FloatLayout):
         self.total_rounds_planned = sum(
             len(block.get('rounds') or []) for block in self.blocks
         )
+        self._block_start_markers_sent.clear()
+        self._block_end_markers_sent.clear()
 
         self.reset_ui_for_new_block()
 
